@@ -19,6 +19,7 @@ class MenuController {
         
         // Configure status item
         guard let button = statusItem.button else {
+            print("NowPlaying: statusItem.button was nil; menu bar item will not be functional")
             return
         }
         
@@ -42,31 +43,20 @@ class MenuController {
         // Force update
         button.needsDisplay = true
         
-        // Observe media control changes
-        // Update menu bar when title changes
-        mediaControl.$title
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] title in
-                self?.updateTitle(title)
-            }
-            .store(in: &cancellables)
-        
-        // Update menu bar when artwork changes
-        mediaControl.$artworkImage
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                // Trigger updateTitle to refresh artwork in menu bar
-                self?.updateTitle(self?.mediaControl.title ?? "")
-            }
-            .store(in: &cancellables)
-        
-        mediaControl.$isPlaying
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.buildMenu()
-            }
-            .store(in: &cancellables)
-        
+        // Observe media control changes. title/artworkImage/isPlaying are typically
+        // updated together for a single stream payload; merge and debounce them so
+        // that produces one menu rebuild instead of one per field.
+        Publishers.Merge3(
+            mediaControl.$title.map { _ in () },
+            mediaControl.$artworkImage.map { _ in () },
+            mediaControl.$isPlaying.map { _ in () }
+        )
+        .debounce(for: .milliseconds(10), scheduler: DispatchQueue.main)
+        .sink { [weak self] in
+            guard let self = self else { return }
+            self.updateTitle(self.mediaControl.title)
+        }
+        .store(in: &cancellables)
     }
     
     private func buildMenu() {
@@ -203,8 +193,7 @@ class MenuController {
     
     @objc private func togglePlayPause() {
         mediaControl.togglePlayPause()
-        // Menu will update on next change from mediaControl
-        buildMenu()
+        // Menu rebuilds once mediaControl.isPlaying reflects the real state.
     }
     
     @objc private func previousTrack() {
