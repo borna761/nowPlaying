@@ -22,32 +22,34 @@ class MediaControl: ObservableObject {
     // Cache artwork to prevent flickering when artwork temporarily disappears
     private var cachedArtwork: NSImage? = nil
     
-    private var mediaControlPath: String {
+    // Resolved once and cached: the binary's location can't change during the app's lifetime,
+    // but this property is read on every play/pause/skip call.
+    private lazy var mediaControlPath: String = {
         // Try common Homebrew locations
         let possiblePaths = [
             "/opt/homebrew/bin/media-control",  // Apple Silicon Homebrew
             "/usr/local/bin/media-control"      // Intel Homebrew
         ]
-        
+
         for path in possiblePaths {
             if FileManager.default.fileExists(atPath: path) {
                 return path
             }
         }
-        
+
         // Fallback: use which to find it in PATH
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/which")
         task.arguments = ["media-control"]
-        
+
         let pipe = Pipe()
         task.standardOutput = pipe
         task.standardError = Pipe()
-        
+
         do {
             try task.run()
             task.waitUntilExit()
-            
+
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
                !path.isEmpty, FileManager.default.fileExists(atPath: path) {
@@ -56,34 +58,36 @@ class MediaControl: ObservableObject {
         } catch {
             // Ignore
         }
-        
+
         // Default fallback (will show error if not found)
         return "/opt/homebrew/bin/media-control"
-    }
+    }()
     
     func startStreaming() {
         queue.async { [weak self] in
             guard let self = self else { return }
-            
-            // Stop any existing process
-            self.stopStreaming()
-            
+
+            // Stop any existing process. Already running on `queue`, so call the
+            // unsynchronized body directly instead of `stopStreaming()` (which
+            // re-enters `queue` and would deadlock).
+            self.stopStreamingOnQueue()
+
             let process = Process()
             process.executableURL = URL(fileURLWithPath: self.mediaControlPath)
             process.arguments = ["stream"]
-            
+
             let pipe = Pipe()
             process.standardOutput = pipe
             process.standardError = Pipe() // Discard stderr
-            
+
             self.process = process
             self.pipe = pipe
             self.fileHandle = pipe.fileHandleForReading
-            
+
             guard let fileHandle = self.fileHandle else {
                 return
             }
-            
+
             // Set up notification for new data
             NotificationCenter.default.addObserver(
                 self,
@@ -91,21 +95,21 @@ class MediaControl: ObservableObject {
                 name: FileHandle.readCompletionNotification,
                 object: fileHandle
             )
-            
+
             do {
                 try process.run()
-                
-                // Small delay to ensure process is fully started, then start reading
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                    guard let self = self, let fileHandle = self.fileHandle else {
-                        return
-                    }
-                    
-                    // Start reading data asynchronously
-                    fileHandle.readInBackgroundAndNotify()
+                // readInBackgroundAndNotify() schedules its read on the calling
+                // thread's run loop; `queue` is a plain GCD queue with no run loop,
+                // so this must run on the main thread (which always has one).
+                DispatchQueue.main.async { [weak self] in
+                    self?.fileHandle?.readInBackgroundAndNotify()
                 }
-                
             } catch {
+                // run() failed: the process was never launched, so it must not be
+                // terminated/waited on later.
+                self.process = nil
+                self.pipe = nil
+                self.fileHandle = nil
                 DispatchQueue.main.async { [weak self] in
                     self?.title = "Error: Unable to start"
                     self?.artist = "Check media-control installation"
@@ -113,17 +117,25 @@ class MediaControl: ObservableObject {
             }
         }
     }
-    
+
     func stopStreaming() {
+        // Synchronize with `queue`, which is where startStreaming() mutates the
+        // same process/pipe/fileHandle state, so this is safe to call from any
+        // thread (including the main thread on app quit, and from deinit).
+        queue.sync {
+            self.stopStreamingOnQueue()
+        }
+    }
+
+    private func stopStreamingOnQueue() {
         process?.terminate()
-        process?.waitUntilExit()
-        
+
         fileHandle?.closeFile()
         fileHandle = nil
         process = nil
         pipe = nil
         buffer = Data()
-        
+
         NotificationCenter.default.removeObserver(self, name: FileHandle.readCompletionNotification, object: nil)
     }
     
@@ -134,7 +146,21 @@ class MediaControl: ObservableObject {
         }
         
         if data.isEmpty {
-            fileHandle.readInBackgroundAndNotify()
+            // Empty data means EOF: the media-control stream process exited/died.
+            // Stop instead of re-arming (which would spin, since the handle stays
+            // at EOF), and reset state so nothing is left showing a stale track.
+            queue.async { [weak self] in
+                self?.stopStreamingOnQueue()
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.title = "Not playing"
+                self.artist = ""
+                self.album = ""
+                self.isPlaying = false
+                self.artworkImage = nil
+                self.cachedArtwork = nil
+            }
             return
         }
         
@@ -185,8 +211,11 @@ class MediaControl: ObservableObject {
             let newTitle = payload["title"] as? String ?? ""
             let newArtist = payload["artist"] as? String ?? ""
             
-            // Check if track actually changed by comparing current published values with new values
-            let trackChanged = !newTitle.isEmpty && newTitle != self.title
+            // Check if track actually changed by comparing current published values with new values.
+            // Title alone isn't a reliable identity (two different tracks can share a title), so
+            // also treat an artist change as a track change.
+            let trackChanged = (!newTitle.isEmpty && newTitle != self.title) ||
+                (!newArtist.isEmpty && newArtist != self.artist)
             
             if !newTitle.isEmpty {
                 self.title = newTitle

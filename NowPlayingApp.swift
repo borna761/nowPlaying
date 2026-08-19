@@ -10,11 +10,9 @@ class NowPlayingApp: NSObject, NSApplicationDelegate {
         
         // Create menu controller
         menuController = MenuController(mediaControl: mediaControl)
-        
-        // Start streaming media updates after a short delay to ensure UI is ready
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.mediaControl.startStreaming()
-        }
+
+        // MenuController's init is synchronous, so it's already fully set up here.
+        mediaControl.startStreaming()
     }
     
     func applicationWillTerminate(_ aNotification: Notification) {
