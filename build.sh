@@ -54,6 +54,13 @@ else
     echo "Warning: Info.plist not found"
 fi
 
+# Copy app icon (referenced by Info.plist's CFBundleIconFile)
+if [ -f "${APP_NAME}.icns" ]; then
+    cp "${APP_NAME}.icns" "${RESOURCES_PATH}/${APP_NAME}.icns"
+else
+    echo "Warning: ${APP_NAME}.icns not found"
+fi
+
 echo "Build complete! Run with: open ${APP_BUNDLE}"
 echo "Or execute directly: ${EXECUTABLE_PATH}"
 
