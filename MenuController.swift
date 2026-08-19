@@ -2,6 +2,12 @@ import AppKit
 import Combine
 
 class MenuController {
+    // Character budget for the menu bar title, with/without artwork shown alongside it.
+    // The built-in display (has a notch, less room) keeps the original compact lengths;
+    // an external/desktop display gets much more room to show the full title.
+    private static let compactMaxLength = (withArtwork: 40, withoutArtwork: 50)
+    private static let wideMaxLength = (withArtwork: 90, withoutArtwork: 110)
+
     private let statusItem: NSStatusItem
     private let mediaControl: MediaControl
     private var menu: NSMenu
@@ -57,6 +63,33 @@ class MenuController {
             self.updateTitle(self.mediaControl.title)
         }
         .store(in: &cancellables)
+
+        // Re-measure available space when displays are connected/disconnected
+        // (e.g. docking/undocking a laptop), so truncation adapts live.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(screenParametersChanged),
+            name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self, name: NSApplication.didChangeScreenParametersNotification, object: nil)
+    }
+
+    @objc private func screenParametersChanged() {
+        updateTitle(mediaControl.title)
+    }
+
+    // The screen currently hosting the menu bar is always screens[0]. The built-in
+    // display (when present) has a notch and less usable menu bar width.
+    private var isOnBuiltInDisplay: Bool {
+        guard let screen = NSScreen.screens.first,
+              let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
+            return true // conservative fallback: assume notch-constrained
+        }
+        return CGDisplayIsBuiltin(screenNumber) != 0
     }
     
     private func buildMenu() {
@@ -147,7 +180,9 @@ class MenuController {
         guard let button = statusItem.button else {
             return
         }
-        
+
+        let lengths = isOnBuiltInDisplay ? MenuController.compactMaxLength : MenuController.wideMaxLength
+
         // Show artwork if available, and also show title
         if let artwork = mediaControl.artworkImage {
             // Resize artwork for menu bar (typically 18-22px height)
@@ -161,9 +196,9 @@ class MenuController {
             resizedArtwork.unlockFocus()
             button.image = resizedArtwork
             button.image?.isTemplate = false // Keep original colors
-            
+
             // Also show title text alongside artwork
-            let maxLength = 40 // Shorter since we have artwork
+            let maxLength = lengths.withArtwork
             let displayTitle: String
             if title.count > maxLength {
                 displayTitle = String(title.prefix(maxLength - 3)) + "..."
@@ -175,7 +210,7 @@ class MenuController {
             // No artwork - show title text only
             button.image = nil
             // Truncate title if too long
-            let maxLength = 50
+            let maxLength = lengths.withoutArtwork
             let displayTitle: String
             if title.count > maxLength {
                 displayTitle = String(title.prefix(maxLength - 3)) + "..."
@@ -184,9 +219,9 @@ class MenuController {
             }
             button.title = displayTitle
         }
-        
+
         button.isHidden = false
-        
+
         // Rebuild menu to update play/pause state and track info
         buildMenu()
     }
