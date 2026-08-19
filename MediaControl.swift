@@ -98,7 +98,12 @@ class MediaControl: ObservableObject {
 
             do {
                 try process.run()
-                fileHandle.readInBackgroundAndNotify()
+                // readInBackgroundAndNotify() schedules its read on the calling
+                // thread's run loop; `queue` is a plain GCD queue with no run loop,
+                // so this must run on the main thread (which always has one).
+                DispatchQueue.main.async { [weak self] in
+                    self?.fileHandle?.readInBackgroundAndNotify()
+                }
             } catch {
                 // run() failed: the process was never launched, so it must not be
                 // terminated/waited on later.
