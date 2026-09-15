@@ -18,10 +18,16 @@ let package = Package(
             dependencies: [],
             path: ".",
             sources: [
+                "main.swift",
                 "NowPlayingApp.swift",
                 "MediaControl.swift",
                 "MenuController.swift"
             ]
+        ),
+        .testTarget(
+            name: "NowPlayingTests",
+            dependencies: ["NowPlaying"],
+            path: "Tests/NowPlayingTests"
         )
     ]
 )
