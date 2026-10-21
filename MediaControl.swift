@@ -25,22 +25,42 @@ class MediaControl: ObservableObject {
     // Resolved once and cached: the binary's location can't change during the app's lifetime,
     // but this property is read on every play/pause/skip call.
     private lazy var mediaControlPath: String = {
-        // Try common Homebrew locations
-        let possiblePaths = [
-            "/opt/homebrew/bin/media-control",  // Apple Silicon Homebrew
-            "/usr/local/bin/media-control"      // Intel Homebrew
+        MediaControl.resolvePath(
+            home: NSHomeDirectory(),
+            fileExists: { FileManager.default.fileExists(atPath: $0) },
+            shellLookup: MediaControl.lookUpInLoginShell
+        ) ?? "/opt/homebrew/bin/media-control"  // Default fallback (will show error if not found)
+    }()
+
+    static func candidatePaths(home: String) -> [String] {
+        [
+            "/opt/homebrew/bin/media-control",       // Apple Silicon Homebrew
+            "/usr/local/bin/media-control",          // Intel Homebrew
+            "\(home)/homebrew/bin/media-control",    // Per-user Homebrew (no admin)
+            "\(home)/.homebrew/bin/media-control"
         ]
+    }
 
-        for path in possiblePaths {
-            if FileManager.default.fileExists(atPath: path) {
-                return path
-            }
+    static func resolvePath(
+        home: String,
+        fileExists: (String) -> Bool,
+        shellLookup: () -> String?
+    ) -> String? {
+        if let path = candidatePaths(home: home).first(where: fileExists) {
+            return path
         }
+        if let path = shellLookup(), fileExists(path) {
+            return path
+        }
+        return nil
+    }
 
-        // Fallback: use which to find it in PATH
+    // A GUI/LaunchAgent app inherits a minimal PATH, so `which` can't see a Homebrew
+    // installed in a custom prefix. A login shell has the user's real PATH.
+    private static func lookUpInLoginShell() -> String? {
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        task.arguments = ["media-control"]
+        task.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        task.arguments = ["-l", "-c", "command -v media-control"]
 
         let pipe = Pipe()
         task.standardOutput = pipe
@@ -48,20 +68,16 @@ class MediaControl: ObservableObject {
 
         do {
             try task.run()
-            task.waitUntilExit()
-
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !path.isEmpty, FileManager.default.fileExists(atPath: path) {
-                return path
-            }
+            task.waitUntilExit()
+            let path = String(data: data, encoding: .utf8)?
+                .split(separator: "\n").last
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            return path?.isEmpty == false ? path : nil
         } catch {
-            // Ignore
+            return nil
         }
-
-        // Default fallback (will show error if not found)
-        return "/opt/homebrew/bin/media-control"
-    }()
+    }
     
     func startStreaming() {
         queue.async { [weak self] in
